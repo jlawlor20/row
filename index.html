@@ -588,6 +588,41 @@ body::after {
 }
 .gm-status.gm-status-error { color: var(--danger); }
 
+.gm-repeat-btn {
+  padding: 11px 13px;
+  border: 1px solid rgba(255,255,255,0.10);
+  border-radius: 12px;
+  background: rgba(255,255,255,0.04);
+  font-size: 15px; line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.gm-repeat-btn:hover { background: rgba(255,255,255,0.07); }
+.gm-repeat-btn.active {
+  background: rgba(255,255,255,0.14);
+  border-color: rgba(255,255,255,0.30);
+}
+.gm-repeat-picker {
+  flex-basis: 100%;
+  display: flex; gap: 6px;
+}
+.gm-repeat-day {
+  width: 30px; height: 30px;
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 8px;
+  background: rgba(0,0,0,0.28);
+  color: var(--text-tertiary);
+  font-family: inherit; font-size: 11px; font-weight: 700;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+.gm-repeat-day:hover { border-color: rgba(255,255,255,0.20); }
+.gm-repeat-day.active {
+  background: rgba(255,255,255,0.16);
+  border-color: rgba(255,255,255,0.32);
+  color: var(--text-primary);
+}
+
 @media (max-width: 480px) {
   body { padding: max(20px, env(safe-area-inset-top)) 14px 50px; }
   .gm-card { padding: 16px; }
@@ -665,8 +700,18 @@ body::after {
       <button type="button" id="gmPushBtn" class="gm-push-btn" style="display:none;">Push remaining to tomorrow</button>
       <div class="goal-input-wrap gm-input-wrap">
         <input id="goalInput" class="gm-input" type="text" placeholder="Add a goal for today…" autocomplete="off">
+        <button type="button" id="goalRepeatBtn" class="gm-repeat-btn" aria-label="Repeat weekly" title="Repeat weekly">🔁</button>
         <button type="button" id="goalAddBtn"    class="gm-add">+ Add</button>
         <button type="button" id="goalPolishBtn" class="gm-polish">✨ Polish</button>
+        <div class="gm-repeat-picker" id="goalRepeatPicker" hidden>
+          <button type="button" class="gm-repeat-day" data-day="0">S</button>
+          <button type="button" class="gm-repeat-day" data-day="1">M</button>
+          <button type="button" class="gm-repeat-day" data-day="2">T</button>
+          <button type="button" class="gm-repeat-day" data-day="3">W</button>
+          <button type="button" class="gm-repeat-day" data-day="4">T</button>
+          <button type="button" class="gm-repeat-day" data-day="5">F</button>
+          <button type="button" class="gm-repeat-day" data-day="6">S</button>
+        </div>
         <div class="gm-status" id="polishStatus"></div>
       </div>
     </div>
@@ -778,6 +823,41 @@ body::after {
       storeDelete(k);
     });
     setGoals(todayK, today);
+  }
+
+  // ---------- recurring goals ----------
+  function getRecurringRules() {
+    const r = storeGet('goals_recurring_v1');
+    return Array.isArray(r) ? r : [];
+  }
+  function saveRecurringRule(text, weekdays) {
+    const rules = getRecurringRules();
+    const idx = rules.findIndex(r => r && r.text === text);
+    if (idx !== -1) rules[idx].weekdays = weekdays;
+    else rules.push({ text, weekdays });
+    storeSet('goals_recurring_v1', rules);
+  }
+  // Ship a sensible default the first time this feature runs.
+  if (storeGet('goals_recurring_v1') === null) {
+    storeSet('goals_recurring_v1', [{ text: 'Gym', weekdays: [3] }]);
+  }
+  function seedRecurringGoals() {
+    const rules = getRecurringRules();
+    if (!rules.length) return;
+    const todayDateStr = getActiveDateString();
+    const dow = new Date(todayDateStr + 'T00:00:00').getDay();
+    const key = 'goals:' + todayDateStr;
+    const list = getGoals(key);
+    const texts = new Set(list.map(g => g.text));
+    let changed = false;
+    rules.forEach(r => {
+      if (r && r.text && Array.isArray(r.weekdays) && r.weekdays.indexOf(dow) !== -1 && !texts.has(r.text)) {
+        list.push({ text: r.text, done: false });
+        texts.add(r.text);
+        changed = true;
+      }
+    });
+    if (changed) setGoals(key, list);
   }
 
   // ---------- streak ----------
@@ -1237,11 +1317,18 @@ body::after {
     return arr[0].trim();
   }
 
-  function makeAddHandlers(input, addBtn, polishBtn, key, statusEl, reload) {
+  function makeAddHandlers(input, addBtn, polishBtn, key, statusEl, reload, getRepeatDays, clearRepeatUI) {
     function plainAdd(text) {
       const list = getGoals(key);
       list.push({ text, done: false });
       setGoals(key, list);
+      if (getRepeatDays) {
+        const days = getRepeatDays();
+        if (days && days.length) {
+          saveRecurringRule(text, days);
+          if (clearRepeatUI) clearRepeatUI();
+        }
+      }
       input.value = '';
       reload();
     }
@@ -1274,13 +1361,37 @@ body::after {
     });
   }
 
+  // ---------- Repeat weekly picker (today card only) ----------
+  const repeatBtn = document.getElementById('goalRepeatBtn');
+  const repeatPicker = document.getElementById('goalRepeatPicker');
+  const repeatDays = new Set();
+  function clearRepeatUI() {
+    repeatDays.clear();
+    repeatPicker.querySelectorAll('.gm-repeat-day').forEach(d => d.classList.remove('active'));
+    repeatPicker.hidden = true;
+    repeatBtn.classList.remove('active');
+  }
+  repeatBtn.addEventListener('click', () => {
+    repeatPicker.hidden = !repeatPicker.hidden;
+    repeatBtn.classList.toggle('active', !repeatPicker.hidden);
+  });
+  repeatPicker.querySelectorAll('.gm-repeat-day').forEach(dayBtn => {
+    dayBtn.addEventListener('click', () => {
+      const day = Number(dayBtn.dataset.day);
+      if (repeatDays.has(day)) { repeatDays.delete(day); dayBtn.classList.remove('active'); }
+      else { repeatDays.add(day); dayBtn.classList.add('active'); }
+    });
+  });
+
   makeAddHandlers(
     document.getElementById('goalInput'),
     document.getElementById('goalAddBtn'),
     document.getElementById('goalPolishBtn'),
     todayKey(),
     document.getElementById('polishStatus'),
-    loadToday
+    loadToday,
+    () => Array.from(repeatDays),
+    clearRepeatUI
   );
   makeAddHandlers(
     document.getElementById('tomorrowInput'),
@@ -1293,6 +1404,7 @@ body::after {
 
   // ---------- Boot ----------
   rollover();
+  seedRecurringGoals();
   processStreak();
   loadToday();
   loadTomorrow();
@@ -1312,6 +1424,7 @@ document.addEventListener('DOMContentLoaded', function () {
   if (typeof initCloudSync !== 'function') return;
   initCloudSync({
     appKey: 'goals',
+    syncedKeys: ['goals_recurring_v1'],
     syncedPrefixes: ['goals:'],
     onApplied: function () {
       window.dispatchEvent(new CustomEvent('goals-changed'));
